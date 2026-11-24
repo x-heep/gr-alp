@@ -1,0 +1,122 @@
+# Re-vendors X-ALP main every night and runs the CI on it. When the CI passes, the update is pushed to main;
+# when it fails, main stays on the last working X-ALP and an issue is opened (GitHub notifies the assignee).
+# The attempted update stays on the xalp-canary branch until the next run.
+name: X-ALP canary
+
+on:
+  schedule:
+    - cron: '0 23 * * *' # daily, midnight in Italy (CET; 1:00 in summer time); GitHub cron is UTC
+  workflow_dispatch:
+
+concurrency: xalp-canary
+
+permissions:
+  contents: write # push the xalp-canary branch and main
+  issues: write # report breakages
+  packages: read # pull the toolchain image in the CI
+
+env:
+  BRANCH: xalp-canary
+  ASSIGNEE: LuigiGiuffrida98
+
+jobs:
+  check:
+    if: github.repository == 'x-heep/GR-ALP' # Only run in upstream repository
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.sha.outputs.sha }}
+      run: ${{ steps.sha.outputs.run }}
+      image: ${{ steps.image.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: sha
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sha=$(git ls-remote https://github.com/x-heep/x-alp.git refs/heads/main | cut -f1)
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          # Skip a commit already vendored, or already reported as breaking in an open issue.
+          reported=$(gh issue list --label xalp-canary --state open --search "$sha in:body" --json number --jq length 2>/dev/null || echo 0)
+          if grep -q "$sha" hw/vendor/x-alp.lock.hjson || [ "$reported" != 0 ]; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+      - id: image
+        # X-ALP has no tags: use the tag of the X-HEEP commit pinned by the new X-ALP commit.
+        run: |
+          rev=$(curl -fsSL "https://raw.githubusercontent.com/x-heep/x-alp/${{ steps.sha.outputs.sha }}/hw/vendor/x-heep.lock.hjson" | sed -n 's/^ *rev: *//p')
+          git clone --bare --filter=tree:0 https://github.com/x-heep/x-heep.git /tmp/x-heep-bare
+          tag=$(git -C /tmp/x-heep-bare describe --tags --abbrev=0 --match "v*" "${rev:?no X-HEEP rev in X-ALP}" 2>/dev/null || echo latest)
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+  update:
+    needs: check
+    if: needs.check.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/x-heep/x-heep/x-heep-toolchain:${{ needs.check.outputs.image }}
+    env:
+      SHA: ${{ needs.check.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Re-vendor X-ALP and regenerate
+        shell: bash -le {0}
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          pip install -r hw/vendor/x-alp/util/python-requirements.txt
+          sed -i "s/rev: \"[0-9a-f]*\"/rev: \"$SHA\"/" hw/vendor/x-alp.vendor.hjson
+          util/vendor.py -vU hw/vendor/x-alp.vendor.hjson
+          pip install -r hw/vendor/x-alp/util/python-requirements.txt
+          make mcu-gen
+      - name: Push to the canary branch
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m "Update X-ALP to x-heep/x-alp@${SHA:0:7}"
+          git push --force origin "HEAD:refs/heads/$BRANCH"
+
+  ci:
+    needs: update
+    uses: ./.github/workflows/ci.yml
+    with:
+      ref: xalp-canary
+
+  pin:
+    needs: [check, ci]
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      SHA: ${{ needs.check.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.BRANCH }}
+          fetch-depth: 0
+      - run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git pull --rebase origin main
+          git push origin HEAD:main ":$BRANCH"
+          for n in $(gh issue list --label xalp-canary --state open --json number --jq '.[].number'); do
+            gh issue close "$n" --comment "Works again with x-heep/x-alp@$SHA, now vendored on main."
+          done
+
+  report:
+    needs: [check, update, ci]
+    if: failure()
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      SHA: ${{ needs.check.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          gh label create xalp-canary --color B60205 --description 'GR-ALP broken by a new X-ALP commit' --force
+          gh issue create --label xalp-canary --assignee "$ASSIGNEE" \
+            --title "GR-ALP broken by X-ALP ${SHA:0:7}" \
+            --body "Re-vendoring or the CI fails with x-heep/x-alp@$SHA: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+          The attempted update is on the \`$BRANCH\` branch (if re-vendoring succeeded). main stays on X-ALP \`$(sed -n 's/.*rev: *//p' hw/vendor/x-alp.lock.hjson)\`."

@@ -1,0 +1,64 @@
+# AGENTS.md
+
+## What this repo is
+
+GR-ALP is a **vendorization wrapper around X-ALP**: the SoC RTL comes from the vendored copy in `hw/vendor/x-alp/` (pinned by `hw/vendor/x-alp.vendor.hjson`). The root Makefile delegates any target it doesn't define to X-ALP's Makefile through its last rule, a `%:` catch-all (as X-HEEP's `external.mk` does): keep it **last**. Its sibling for X-HEEP is GR-HEEP.
+
+## Generated files — never edit directly
+
+`make mcu-gen` (X-ALP's Mako generator, run from `hw/vendor/x-alp`) regenerates these from `.tpl` templates; edit the `.tpl` instead:
+
+- `hw/gr-alp/gr_alp.sv` (from `.tpl`, thin top around `x_alp`; its external AXI/reg interfaces are tied off until GR-ALP IPs plug in)
+- `tb/tb_util.svh` (from `.tpl`: X-ALP's `tb_util.svh` with its hierarchical paths moved under `u_gr_alp`)
+- X-ALP's own outputs that X-ALP tracks (`hw/x_alp.sv`, `core_v_mcu.sv`, `*_reg_pkg.sv`, ...): excluded in `hw/vendor/x-alp.vendor.hjson` and gitignored; keep the two lists in sync
+
+Generated files are gitignored — they are not committed. `mcu-gen` also runs `make verible` (format + lint) on `hw/gr-alp/*.sv`; CI's lint job runs `mcu-gen` and fails if any tracked file differs, so keep static RTL verible-clean.
+
+## Configuration
+
+- `config/mcu-gen-config.py` — the SoC config: CPU (CVA6), last-level cache (scratchpad at `0x10000000`, cached DRAM at `0x80000000`), address map (`ext_slaves` region for external AXI slaves) and peripheral domain (`Ext_peripheral` window). Almost every hardware change starts here.
+- `config/gr-alp_pad_cfg.py` — pad ring configuration.
+- After changing any config or `.tpl`: re-run `make mcu-gen` (or `make test`, which runs it first).
+- `tb/testharness.sv` and `hw/fpga_ext/xilinx_gr_alp_wrapper.sv` are derived from X-ALP's testharness and `xilinx_core_v_mcu_wrapper.sv`.
+
+## Environment
+
+- Python tooling (fusesoc, etc.): the Makefile uses `./.venv/bin/` unless a conda env is active (`CONDA_DEFAULT_ENV`).
+- `RISCV_XALP` must point to the RISC-V toolchain (without `/bin`); it defaults to `RISCV_XHEEP`. Default prefix `riscv32-corev-` (the CORE-V toolchain also builds RV64).
+- Toolchain container: `ghcr.io/x-heep/x-heep/x-heep-toolchain` (X-ALP has no tags: CI picks the tag of the X-HEEP commit pinned in `hw/vendor/x-alp/hw/vendor/x-heep.lock.hjson`).
+
+## Commands
+
+```bash
+make mcu-gen                                  # generate RTL+SW headers for TARGET (default asic)
+make app PROJECT=gr_alp_hello_world           # build firmware -> sw/build/main.spm.elf (LINKER=spm default, or dram)
+make verilator-build                          # build Verilator model (after RTL changes)
+make verilator-run                            # simulate sw/build/main.$(LINKER).elf (--BOOTMODE=force)
+make verilator-run-app                        # build app + simulate it
+make test                                     # mcu-gen + compile & simulate all apps (verilator)
+make test TEST_FLAGS=--compile-only           # fast: compile only
+make vivado-fpga FPGA_BOARD=zcu104            # FPGA bitstream (also aup-zu3)
+make rename NAME=my-soc                       # rename the project to my-soc (file contents and paths)
+make verible                                  # format+lint SystemVerilog
+make format-python                            # black on config/ and test/ only
+```
+
+- `make test` runs `test/gr_alp_test_apps.py`: every app in `hw/vendor/x-alp/sw/applications` (minus `BLACKLIST_XALP`) plus **every** app in `sw/applications` is compiled for the `spm` linker and simulated. Adding an app under `sw/applications` adds it to CI. The script builds the Verilator model itself (`make verilator-build`), so no pre-built model is needed. X-ALP apps include `printf.h` for `printf`.
+- `make TARGET=<board>` selects FPGA vs ASIC flow; unsupported values error out.
+- FuseSoC core is `gr-alp.core` (`x-heep:systems:gr-alp`); sim build lands in `build/x-heep_systems_gr-alp_*/sim-verilator`.
+- `make rename` (`util/rename.py`) skips `hw/vendor`, `build` and symlinks; its doctest is `python3 -m doctest util/rename.py`.
+
+## CI (`.github/workflows/ci.yml`)
+
+Gate order (via job needs): `lint` + `check-vendor` + `black-formatter` → `simulate-apps`.
+
+- **lint**: `make mcu-gen`, then git-diff — fails if generation or verible formatting changes any tracked file.
+- **check-vendor**: re-runs `util/vendor.py` on every `hw/vendor/*.vendor.hjson` and fails on diffs.
+- **black-formatter**: `black --check` on `config`, `test` and `util/rename.py`, pinned `~= 24.8.0`.
+- **simulate-apps**: `make mcu-gen && python3 test/gr_alp_test_apps.py`.
+
+## Vendored X-ALP
+
+- Do **not** hand-edit files under `hw/vendor/x-alp/` for a fix you intend to keep: CI re-vendors and rejects in-place edits. For quick local debugging it's fine, but the change must go upstream or into a patch (`hw/vendor/patches/x-alp/`, referenced by `patch_dir` in the vendor hjson).
+- Never edit `hw/vendor/x-alp.lock.hjson` (generated by `util/vendor.py`).
+- Upstream updates are automated: the nightly `xalp-canary` workflow bumps the rev, runs CI, and pushes to `main` only if it passes; failures open an issue. Don't bump the rev manually.

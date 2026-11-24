@@ -1,0 +1,282 @@
+// Copyright 2025 EPFL and Politecnico di Torino.
+// Copyright and related rights are licensed under the Solderpad Hardware
+// License, Version 2.0 (the "License"); you may not use this file except in
+// compliance with the License. You may obtain a copy of the License at
+// http://solderpad.org/licenses/SHL-2.0. Unless required by applicable law
+// or agreed to in writing, software, hardware and materials distributed under
+// this License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
+// CONDITIONS OF ANY KIND, either express or implied. See the License for the
+// specific language governing permissions and limitations under the License.
+//
+// File: x_alp_testharness.sv
+// Author: Flavia Guella
+// Date: 03/12/2025
+// Inspired by x-heep testharness.sv
+
+module testharness #(
+    parameter int unsigned CLK_FREQUENCY = 'd100_000  //KHz
+) (
+    input logic clk_i,
+    input logic rst_ni,
+
+    // Boot mode
+    //----------
+    input logic [1:0] boot_mode_i,
+
+    // RTC Clic clock
+    // --------------
+    input logic rtc_i,
+
+    // JTAG
+    // ----
+    input  logic sim_jtag_enable_i,
+    input  logic jtag_tck_i,
+    input  logic jtag_tms_i,
+    input  logic jtag_trst_ni,
+    input  logic jtag_tdi_i,
+    output logic jtag_tdo_o,
+
+    // Exit sim
+    // --------
+    output logic [31:0] exit_value_o,
+    output logic        exit_valid_o
+);
+
+    // Includes
+    // --------
+    `include "tb_util.svh"
+
+    // Internal signals
+    // ----------------
+
+    // JTAG
+    // logic sim_jtag_enable;
+    // logic sim_jtag_tck;
+    // logic sim_jtag_trst_n;
+    // logic sim_jtag_tms;
+    // logic sim_jtag_tdi;
+    // logic sim_jtag_tdo;
+
+    logic                         jtag_tck;
+    logic                         jtag_trst_n;
+    logic                         jtag_tms;
+    logic                         jtag_tdi;
+    logic                         jtag_tdo;
+
+    // UART
+    logic                         uart_tx;
+    logic                         uart_rx;
+
+    // External Peripheral Interface
+    core_v_mcu_pkg::axi_slv_req_t ext_slv_req;
+    core_v_mcu_pkg::axi_slv_rsp_t ext_slv_rsp;
+
+    // Memory interface
+    localparam int AddrWidth = $clog2(256) + 3;  // 11-bit byte address for 2KB (256 words × 8B)
+    logic                 tb_mem_req;
+    logic [AddrWidth-1:0] tb_mem_addr;
+    logic [         63:0] tb_mem_wdata;
+    logic                 tb_mem_we;
+    logic [         63:0] tb_mem_rdata;
+
+    // DRAM behind the LLC master port. Sized to hold a test binary, not the
+    // whole architectural DRAM window: only the low DramAddrWidth address bits
+    // reach it, so anything linked past that wraps.
+    localparam int unsigned DramWords = 32'd8192;  // 64 KiB at 64 bit/word
+    localparam int unsigned DramAddrWidth = $clog2(DramWords * 8);
+
+    core_v_mcu_pkg::axi_llc_req_t                     ext_llc_req;
+    core_v_mcu_pkg::axi_llc_rsp_t                     ext_llc_rsp;
+
+    logic                                             tb_dram_req;
+    logic                         [DramAddrWidth-1:0] tb_dram_addr;
+    logic                         [             63:0] tb_dram_wdata;
+    logic                         [              7:0] tb_dram_strb;
+    logic                                             tb_dram_we;
+    logic                         [             63:0] tb_dram_rdata;
+    logic                                             tb_dram_valid_q;
+
+    // Internal signals
+    logic                                             clk;
+    logic                                             rst_n;
+
+    assign clk   = clk_i;
+    assign rst_n = rst_ni;
+
+    //----
+    // DUT
+    //----
+    x_alp u_x_alp (
+        .clk_i        (clk),
+        .rst_ni       (rst_n),
+        .uart_tx_o    (uart_tx),
+        .uart_rx_i    (uart_rx),
+        .exit_valid_o (exit_valid_o),
+        .exit_value_o (exit_value_o),
+        .jtag_tck_i   (jtag_tck),
+        .jtag_tms_i   (jtag_tms),
+        .jtag_trst_ni (jtag_trst_n),
+        .jtag_tdi_i   (jtag_tdi),
+        .jtag_tdo_o   (jtag_tdo),
+        .jtag_tdo_oe_o(),
+        .ext_slv_req_o(ext_slv_req),
+        .ext_slv_rsp_i(ext_slv_rsp),
+        .ext_mst_req_i('0),
+        .ext_mst_rsp_o(),
+        .ext_reg_req_o(),
+        .ext_reg_rsp_i('0),
+        .test_mode_i  (1'b0),
+        .ext_llc_req_o(ext_llc_req),
+        .ext_llc_rsp_i(ext_llc_rsp)
+    );
+
+    // ----
+    // DRAM
+    // ----
+    // Backs the LLC's cached region. Without it every cache miss stalls
+    // forever, so LINKER=dram binaries never start.
+    axi_to_mem #(
+        .axi_req_t   (core_v_mcu_pkg::axi_llc_req_t),
+        .axi_resp_t  (core_v_mcu_pkg::axi_llc_rsp_t),
+        .AddrWidth   (DramAddrWidth),
+        .DataWidth   (64),
+        .NumBanks    (1),
+        .BufDepth    (1),
+        .HideStrb    (0),
+        .OutFifoDepth(1)
+    ) u_tb_dram_axi_to_mem (
+        .clk_i       (clk_i),
+        .rst_ni      (rst_ni),
+        .busy_o      (),
+        .axi_req_i   (ext_llc_req),
+        .axi_resp_o  (ext_llc_rsp),
+        .mem_req_o   (tb_dram_req),
+        .mem_gnt_i   (tb_dram_req),
+        .mem_addr_o  (tb_dram_addr),
+        .mem_wdata_o (tb_dram_wdata),
+        .mem_strb_o  (tb_dram_strb),
+        .mem_atop_o  (),
+        .mem_we_o    (tb_dram_we),
+        .mem_rvalid_i(tb_dram_valid_q),
+        .mem_rdata_i (tb_dram_rdata)
+    );
+
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) begin
+            tb_dram_valid_q <= '0;
+        end else begin
+            tb_dram_valid_q <= tb_dram_req;
+        end
+    end
+
+    sram_wrapper #(
+        .NumWords (DramWords),
+        .DataWidth(64)
+    ) u_tb_dram (
+        .clk_i           (clk_i),
+        .rst_ni          (rst_ni),
+        .req_i           (tb_dram_req),
+        .we_i            (tb_dram_we),
+        .addr_i          (tb_dram_addr[DramAddrWidth-1:3]),
+        .wdata_i         (tb_dram_wdata),
+        .be_i            (tb_dram_strb),
+        .pwrgate_ni      ('1),
+        .pwrgate_ack_no  (),
+        .set_retentive_ni('1),
+        .rdata_o         (tb_dram_rdata)
+    );
+
+    // --------
+
+    axi_to_mem #(
+        .axi_req_t   (core_v_mcu_pkg::axi_slv_req_t),
+        .axi_resp_t  (core_v_mcu_pkg::axi_slv_rsp_t),
+        .AddrWidth   (AddrWidth),
+        .DataWidth   (64),
+        .NumBanks    (1),
+        .BufDepth    (1),
+        .HideStrb    (0),
+        .OutFifoDepth(1)
+    ) u_tb_axi_to_mem (
+        .clk_i       (clk_i),
+        .rst_ni      (rst_ni),
+        .busy_o      (),
+        .axi_req_i   (ext_slv_req),
+        .axi_resp_o  (ext_slv_rsp),
+        .mem_req_o   (tb_mem_req),
+        .mem_gnt_i   (tb_mem_req),
+        .mem_addr_o  (tb_mem_addr),
+        .mem_wdata_o (tb_mem_wdata),
+        .mem_strb_o  (),
+        .mem_atop_o  (),
+        .mem_we_o    (tb_mem_we),
+        .mem_rvalid_i(tb_mem_valid),
+        .mem_rdata_i (tb_mem_rdata)
+    );
+
+    logic tb_mem_valid_q;
+    logic tb_mem_valid;
+
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) begin
+            tb_mem_valid_q <= '0;
+        end else begin
+            tb_mem_valid_q <= tb_mem_req;
+        end
+    end
+
+    assign tb_mem_valid = tb_mem_valid_q;
+
+    sram_wrapper #(
+        .NumWords (256),
+        .DataWidth(64)
+    ) u_tb_ram0 (
+        .clk_i           (clk_i),
+        .rst_ni          (rst_ni),
+        .req_i           (tb_mem_req),
+        .we_i            (tb_mem_we),
+        .addr_i          (tb_mem_addr[AddrWidth-1:3]),
+        .wdata_i         (tb_mem_wdata),
+        .be_i            ('1),
+        .pwrgate_ni      ('1),
+        .pwrgate_ack_no  (),
+        .set_retentive_ni('1),
+        .rdata_o         (tb_mem_rdata)
+    );
+
+
+
+    // --------
+    // UART DPI
+    // --------
+
+    uartdpi #(
+        .BAUD('d256000),
+        .FREQ(CLK_FREQUENCY * 1000),  //Hz
+        .NAME("uart0")
+    ) u_uart0 (
+        .clk_i (clk_i),
+        .rst_ni(rst_ni),
+        .tx_o  (uart_rx),
+        .rx_i  (uart_tx)
+    );
+
+    SimJTAG #(
+        .TICK_DELAY(1),
+        .PORT      (4567)
+    ) u_sim_jtag (
+        .clock          (clk_i),
+        .reset          (~rst_ni),
+        .enable         (sim_jtag_enable_i),
+        .init_done      (rst_ni),
+        .jtag_TCK       (jtag_tck),
+        .jtag_TMS       (jtag_tms),
+        .jtag_TDI       (jtag_tdi),
+        .jtag_TRSTn     (jtag_trst_n),
+        .jtag_TDO_data  (jtag_tdo),
+        .jtag_TDO_driven(1'b1),
+        .exit           ()
+    );
+
+endmodule
+

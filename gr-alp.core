@@ -1,0 +1,236 @@
+CAPI=2:
+
+# Copyright 2026 Politecnico di Torino
+# Solderpad Hardware License, Version 2.1, see LICENSE.md for details.
+# SPDX-License-Identifier: Apache-2.0 WITH SHL-2.1
+
+name: x-heep:systems:gr-alp
+description: GR-ALP extended SoC (from X-ALP).
+
+filesets:
+  files_rtl_generic:
+    depend:
+    - x-heep:x-alp:core-v-mcu:0.0.1
+    files:
+    - hw/vendor/x-alp/hw/x_alp.sv
+    - hw/gr-alp/gr_alp.sv
+    file_type: systemVerilogSource
+
+  # Simulation (mirrors X-ALP's tb/tb.core, with GR-ALP's testharness)
+  tb-harness:
+    files:
+    - tb/testharness.sv
+    - tb/tb_util.svh: {is_include_file: true}
+    file_type: systemVerilogSource
+
+  tb-verilator-waivers:
+    files:
+    - hw/vendor/x-alp/tb/misc/tb-waivers.vlt
+    file_type: vlt
+
+  tb-verilator:
+    files:
+    - hw/vendor/x-alp/tb/src/verilator/tb_utils.hh: {is_include_file: true}
+    - hw/vendor/x-alp/tb/src/verilator/tb_utils.cpp
+    - hw/vendor/x-alp/tb/src/verilator/tb_elfloader.hh: {is_include_file: true}
+    - hw/vendor/x-alp/tb/src/verilator/tb_elfloader.cpp
+    - hw/vendor/x-alp/tb/src/verilator/tb_sim_ctrl.h: {is_include_file: true}
+    - hw/vendor/x-alp/tb/src/verilator/tb_sim_ctrl.cpp
+    - hw/vendor/x-alp/tb/src/verilator/tb_macros.hh: {is_include_file: true}
+    - hw/vendor/x-alp/tb/src/verilator/tb_macros.cpp
+    - hw/vendor/x-alp/tb/src/tb_top.cpp
+    file_type: cppSource
+
+  tb-dpi:
+    depend:
+    - lowrisc:dv_dpi:uartdpi
+    - pulp-platform.org::riscv_dbg_remote_bitbang
+
+  # FPGA (mirrors the FPGA filesets of X-ALP's xalp.core)
+  rtl-fpga:
+    files:
+    - hw/fpga_ext/xilinx_gr_alp_wrapper.sv
+    - hw/vendor/x-alp/hw/target/fpga/xheep_fpga_support/rtl/prim_xilinx_clk.sv
+    - hw/vendor/x-alp/hw/target/fpga/xheep_fpga_support/rtl/pad_cell_input_xilinx.sv
+    - hw/vendor/x-alp/hw/target/fpga/xheep_fpga_support/rtl/pad_cell_output_xilinx.sv
+    - hw/vendor/x-alp/hw/target/fpga/xheep_fpga_support/rtl/pad_cell_inout_xilinx.sv
+    - hw/vendor/x-alp/hw/vendor/x-heep/pulp_platform/tech_cells_generic/src/fpga/tc_sram_xilinx.sv
+    file_type: systemVerilogSource
+
+  fpga-aup-zu3:
+    files:
+    - hw/vendor/x-alp/hw/target/fpga/xheep_fpga_support/scripts/aup-zu3/xilinx_generate_clk_wizard.tcl: {file_type: tclSource}
+    - hw/vendor/x-alp/hw/target/fpga/xheep_fpga_support/constraints/aup-zu3/pin_assign.xdc: {file_type: xdc}
+    - hw/vendor/x-alp/hw/target/fpga/xheep_fpga_support/constraints/aup-zu3/constraints.xdc: {file_type: xdc}
+
+  fpga-zcu104:
+    files:
+    - hw/vendor/x-alp/hw/target/fpga/xheep_fpga_support/scripts/zcu104/xilinx_generate_clk_wizard.tcl: {file_type: tclSource}
+    - hw/vendor/x-alp/hw/target/fpga/xheep_fpga_support/scripts/zcu104/xilinx_generate_ddr4_ctrl_wizard.tcl: {file_type: tclSource}
+    - hw/vendor/x-alp/hw/target/fpga/xheep_fpga_support/constraints/zcu104/pin_assign.xdc: {file_type: xdc}
+    - hw/vendor/x-alp/hw/target/fpga/xheep_fpga_support/constraints/zcu104/constraints.xdc: {file_type: xdc}
+
+  xdc-fpga-common:
+    files:
+    - hw/vendor/x-alp/hw/target/fpga/xheep_fpga_support/constraints/common/spi_slave.xdc
+    - hw/vendor/x-alp/hw/target/fpga/xheep_fpga_support/constraints/common/jtag.xdc: {file_type: SDC}
+    - hw/vendor/x-alp/hw/target/fpga/xheep_fpga_support/constraints/common/sync.xdc: {file_type: SDC}
+    file_type: xdc
+
+parameters:
+  SYNTHESIS:
+    datatype: bool
+    paramtype: vlogdefine
+    default: false
+  FPGA_SYNTHESIS:
+    datatype: bool
+    paramtype: vlogdefine
+    default: false
+  FPGA_AUP_ZU3:
+    datatype: bool
+    paramtype: vlogdefine
+    default: false
+  FPGA_ZCU104:
+    datatype: bool
+    paramtype: vlogdefine
+    default: false
+  # Simulation (as in X-ALP's xalp.core)
+  USE_JTAG_DPI:
+    datatype: bool
+    description: If set use JTAG DPI interface for RISC-V debug (0 or 1)
+    paramtype: vlogdefine
+    default: false
+  DRAM_LATENCY:
+    datatype: int
+    description: DRAM latency in cycles (used in Verilator simulation only)
+    default: 1
+    paramtype: vlogdefine
+  HPDCACHE_ASSERT_OFF:
+    datatype: bool
+    description: Disable HPDCache assertions
+    default: true
+    paramtype: vlogdefine
+  VERILATOR:
+    datatype: bool
+    paramtype: vlogdefine
+  LOG_LEVEL:
+    datatype: str
+    description: LOG_NONE|LOG_LOW|LOG_MEDIUM|LOG_HIGH|LOG_FULL|LOG_DEBUG
+    paramtype: cmdlinearg
+  trace:
+    datatype: str
+    description: If 'true', generate simulation waves dump.
+    default: "true"
+    paramtype: cmdlinearg
+  no_err:
+    datatype: str
+    description: Always exit with 0. Useful to run post-simulation hooks.
+    default: "true"
+    paramtype: cmdlinearg
+  MAX_CYCLES:
+    datatype: int
+    description: Maximum number of simulation cycles (halt the simulation when reached).
+    paramtype: plusarg
+  BINARY:
+    datatype: str
+    description: Binary to load (ELF format).
+    default: 0
+    paramtype: plusarg
+  BOOTMODE:
+    datatype: str
+    description: "Boot mode: jtag|flash|force."
+    default: 0
+    paramtype: plusarg
+
+scripts:
+  remove_uart_log:
+    cmd: [sh, -c, rm -f uart0.log]
+  print_uart_log:
+    cmd: [sh, -c, cat uart0.log]
+
+targets:
+  default: &default_target
+    filesets:
+    - files_rtl_generic
+    toplevel: [gr_alp]
+  sim:
+    <<: *default_target
+    description: RTL simulation
+    default_tool: verilator
+    filesets_append:
+    - tb-harness
+    - tool_verilator? (tb-verilator-waivers)
+    - tool_verilator? (tb-verilator)
+    - tool_verilator? (tb-dpi)
+    toplevel: [testharness]
+    hooks:
+      pre_run: [remove_uart_log]
+      post_run: [print_uart_log]
+    parameters:
+    - USE_JTAG_DPI
+    - DRAM_LATENCY=3
+    - MAX_CYCLES
+    - tool_verilator? (LOG_LEVEL)
+    - tool_verilator? (trace)
+    - tool_verilator? (no_err)
+    - tool_verilator? (VERILATOR)
+    - BINARY
+    - BOOTMODE
+    - HPDCACHE_ASSERT_OFF
+    tools:
+      verilator:
+        mode: cc
+        verilator_options:
+        - '--cc'
+        - '--assert'
+        - '--trace'
+        - '--trace-fst'
+        - '--trace-structs'
+        - '--x-assign unique'
+        - '--x-initial unique'
+        - '--trace-max-array 1048576'
+        - '--trace-max-width 1048576'
+        - '--exe tb_top.cpp'
+        - '-Wall'
+        - '-Wpedantic'
+        - '-CFLAGS "-Wno-format -Wno-deprecated-declarations"'
+        - '-LDFLAGS "-pthread -lutil -lelf"'
+        - '-Wno-UNUSEDSIGNAL'
+        - '-Wno-UNDRIVEN'
+        - '--timing'
+  aup-zu3:
+    <<: *default_target
+    default_tool: vivado
+    description: RD aup-zu3 Board
+    filesets_append:
+    - rtl-fpga
+    - fpga-aup-zu3
+    - xdc-fpga-common
+    parameters:
+    - SYNTHESIS=true
+    - FPGA_SYNTHESIS=true
+    - FPGA_AUP_ZU3=true
+    tools:
+      vivado:
+        part: xczu3eg-sfvc784-2-e
+        board_part: realdigital.org:aup-zu3-8gb:part0:1.0
+        board_repo_paths: [../../../hw/vendor/x-alp/hw/target/fpga/xheep_fpga_support/board_files/aup-zu3-8gb/1.0]
+    toplevel: [xilinx_gr_alp_wrapper]
+  zcu104:
+    <<: *default_target
+    default_tool: vivado
+    description: ZCU104 Evaluation Board (DDR4 behind the LLC)
+    filesets_append:
+    - rtl-fpga
+    - fpga-zcu104
+    - xdc-fpga-common
+    parameters:
+    - SYNTHESIS=true
+    - FPGA_SYNTHESIS=true
+    - FPGA_ZCU104=true
+    tools:
+      vivado:
+        part: xczu7ev-ffvc1156-2-e
+        board_part: xilinx.com:zcu104:part0:1.0
+        board_repo_paths: [../../../hw/vendor/x-alp/hw/target/fpga/xheep_fpga_support/board_files/esl_epfl_zcu104_board_files]
+    toplevel: [xilinx_gr_alp_wrapper]
